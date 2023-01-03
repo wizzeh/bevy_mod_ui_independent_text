@@ -63,6 +63,7 @@ pub struct IndependentTextBundle {
     pub global_transform: GlobalTransform,
     pub visibility: Visibility,
     pub computed_visibility: ComputedVisibility,
+    pub text_layout: TextLayoutInfo,
 }
 
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
@@ -83,11 +84,14 @@ pub fn update_ui_independent_text_layout(
         &UiText,
         Option<&Text2dBounds>,
         &mut Text2dSize,
+        &mut TextLayoutInfo,
     )>,
 ) {
     let factor_changed = scale_factor_changed.iter().last().is_some();
     let scale_factor = windows.scale_factor(WindowId::primary());
-    for (entity, text_changed, UiText(text), maybe_bounds, mut calculated_size) in &mut text_query {
+    for (entity, text_changed, UiText(text), maybe_bounds, mut calculated_size, mut layout) in
+        &mut text_query
+    {
         if factor_changed || text_changed || queue.remove(&entity) {
             let text_bounds = match maybe_bounds {
                 Some(bounds) => Vec2::new(
@@ -123,6 +127,7 @@ pub fn update_ui_independent_text_layout(
                         scale_value(text_layout_info.size.x, 1. / scale_factor),
                         scale_value(text_layout_info.size.y, 1. / scale_factor),
                     );
+                    *layout = text_layout_info
                 }
             }
         }
@@ -188,11 +193,6 @@ pub fn extract_text_sprite(
                 * Mat4::from_translation(
                     alignment_offset * scale_factor + text_glyph.position.extend(0.),
                 );
-            let stack_index = ui_stack
-                .uinodes
-                .iter()
-                .position(|e| *e == entity)
-                .unwrap_or(0);
             extracted_uinodes.uinodes.push(ExtractedUiNode {
                 transform: extracted_transform,
                 background_color: color,
@@ -201,7 +201,7 @@ pub fn extract_text_sprite(
                 atlas_size,
                 clip: None,
                 scale_factor,
-                stack_index,
+                stack_index: global_transform.translation().z as usize,
             });
         }
     }

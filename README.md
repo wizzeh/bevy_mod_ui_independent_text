@@ -3,7 +3,7 @@
 [![MIT/Apache 2.0](https://img.shields.io/badge/license-MIT%2FApache-blue.svg)](https://github.com/ickshonpe/bevy_mod_ui_independent_text)
 [![crates.io](https://img.shields.io/crates/d/bevy_mod_ui_independent_text)](https://crates.io/crates/bevy_mod_ui_independent_text)
 
-Bevy UI text with a transform independent of the UI's layout. 
+Bevy UI text with a transform independent of the UI's layout.
 * Draw text at any Z depth, above or below Bevy UI elements
 * Text can be rotated and scaled
 * Customisable alignment and bounds
@@ -36,16 +36,16 @@ fn main() {
 Don't forget a camera:
 
 ```rust
-commands.spawn_bundle(Camera2dBundle::default());
+commands.spawn(Camera2dBundle::default());
 ```
 
 Then you can draw text by spawning a IndependentTextBundle:
 
 ```rust
- commands.spawn_bundle(IndependentTextBundle {
+ commands.spawn(IndependentTextBundle {
         text: UiText(Text {
             sections: vec![TextSection {
-                value: "Hello, world".to_string(), 
+                value: "Hello, world".to_string(),
                 style: TextStyle {
                     font: asset_loader.load("Topaz-8.ttf"),
                     font_size: 32.0,
