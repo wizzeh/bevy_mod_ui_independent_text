@@ -197,16 +197,12 @@ pub fn extract_text_sprite(
             rect.min *= inverse_scale_factor;
             rect.max *= inverse_scale_factor;
 
-            let extracted_transform = global_transform.compute_matrix()
-                * Mat4::from_scale(Vec3::splat(scale_factor.recip()))
-                * Mat4::from_translation(
-                    alignment_offset.extend(0.) * scale_factor + position.extend(0.),
-                );
             extracted_uinodes.uinodes.insert(
                 commands.spawn_empty().id(),
                 ExtractedUiNode {
                     stack_index: global_transform.translation().z as u32,
-                    transform: extracted_transform,
+                    transform: transform
+                        * Mat4::from_translation(position.extend(0.) * inverse_scale_factor),
                     color,
                     rect,
                     image: atlas_info.texture.id(),
