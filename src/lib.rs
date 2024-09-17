@@ -1,18 +1,17 @@
-use bevy::text::Text2dBounds;
-use bevy::text::Text2dSize;
 use bevy::text::{scale_value, TextLayoutInfo};
-use bevy::ui::ExtractedUiNode;
-use bevy::ui::ExtractedUiNodes;
 use bevy::ui::RenderUiSystem;
 use bevy::utils::HashSet;
-use bevy::window::ModifiesWindows;
-use bevy::window::WindowId;
 use bevy::window::WindowScaleFactorChanged;
 use bevy::{prelude::*, text::TextPipeline};
+use bevy::{
+    render::view::{check_visibility, VisibilitySystems},
+    ui::ExtractedUiNodes,
+};
 use bevy::{render::Extract, text::TextSettings};
-use bevy::{render::RenderApp, text::FontAtlasWarning};
-use bevy::{render::RenderStage, text::YAxisOrientation};
-use bevy::{text::FontAtlasSet, ui::UiStack};
+use bevy::{render::RenderApp, text::FontAtlasSets};
+use bevy::{text::PositionedGlyph, ui::ExtractedUiNode};
+use bevy::{text::Text2dBounds, window::PrimaryWindow};
+use bevy::{text::YAxisOrientation, ui::NodeType};
 
 /// Newtype wrapper for [`Text`]
 ///
@@ -57,12 +56,12 @@ impl UiText {
 #[derive(Bundle, Default)]
 pub struct IndependentTextBundle {
     pub text: UiText,
-    pub text_2d_size: Text2dSize,
     pub text_2d_bounds: Text2dBounds,
     pub transform: Transform,
     pub global_transform: GlobalTransform,
     pub visibility: Visibility,
-    pub computed_visibility: ComputedVisibility,
+    pub inherited_visibility: InheritedVisibility,
+    pub view_visibility: ViewVisibility,
     pub text_layout: TextLayoutInfo,
 }
 
@@ -71,28 +70,27 @@ pub fn update_ui_independent_text_layout(
     mut queue: Local<HashSet<Entity>>,
     mut textures: ResMut<Assets<Image>>,
     fonts: Res<Assets<Font>>,
-    windows: Res<Windows>,
+    windows: Query<&Window, With<PrimaryWindow>>,
     mut scale_factor_changed: EventReader<WindowScaleFactorChanged>,
-    mut texture_atlases: ResMut<Assets<TextureAtlas>>,
-    mut font_atlas_set_storage: ResMut<Assets<FontAtlasSet>>,
+    mut texture_atlases: ResMut<Assets<TextureAtlasLayout>>,
+    mut font_atlas_set_storage: ResMut<FontAtlasSets>,
     mut text_pipeline: ResMut<TextPipeline>,
     text_settings: Res<TextSettings>,
-    mut font_atlas_warning: ResMut<FontAtlasWarning>,
     mut text_query: Query<(
         Entity,
-        Changed<UiText>,
-        &UiText,
+        Ref<UiText>,
         Option<&Text2dBounds>,
-        &mut Text2dSize,
         &mut TextLayoutInfo,
     )>,
 ) {
-    let factor_changed = scale_factor_changed.iter().last().is_some();
-    let scale_factor = windows.scale_factor(WindowId::primary());
-    for (entity, text_changed, UiText(text), maybe_bounds, mut calculated_size, mut layout) in
-        &mut text_query
-    {
-        if factor_changed || text_changed || queue.remove(&entity) {
+    let factor_changed = scale_factor_changed.read().last().is_some();
+    let scale_factor = match windows.get_single() {
+        Ok(window) => window.scale_factor(),
+        Err(_) => return,
+    };
+    for (entity, ui_text, maybe_bounds, mut layout) in &mut text_query {
+        let UiText(text) = ui_text.as_ref();
+        if factor_changed || ui_text.is_changed() || queue.remove(&entity) {
             let text_bounds = match maybe_bounds {
                 Some(bounds) => Vec2::new(
                     scale_value(bounds.size.x, scale_factor),
@@ -104,13 +102,13 @@ pub fn update_ui_independent_text_layout(
                 &fonts,
                 &text.sections,
                 scale_factor,
-                text.alignment,
+                text.justify,
+                text.linebreak_behavior,
                 text_bounds,
-                &mut *font_atlas_set_storage,
-                &mut *texture_atlases,
-                &mut *textures,
+                &mut font_atlas_set_storage,
+                &mut texture_atlases,
+                &mut textures,
                 &text_settings,
-                &mut font_atlas_warning,
                 YAxisOrientation::TopToBottom,
             ) {
                 Err(TextError::NoSuchFont) => {
@@ -119,13 +117,10 @@ pub fn update_ui_independent_text_layout(
                 Err(e @ TextError::FailedToAddGlyph(_)) => {
                     panic!("Fatal error when processing text: {}.", e);
                 }
-                Err(TextError::ExceedMaxTextAtlases(_)) => {
-                    panic!("Fatal error when processing text. Exceeded max text atlasses.")
-                }
                 Ok(text_layout_info) => {
-                    calculated_size.size = Vec2::new(
-                        scale_value(text_layout_info.size.x, 1. / scale_factor),
-                        scale_value(text_layout_info.size.y, 1. / scale_factor),
+                    layout.logical_size = Vec2::new(
+                        scale_value(text_layout_info.logical_size.x, 1. / scale_factor),
+                        scale_value(text_layout_info.logical_size.y, 1. / scale_factor),
                     );
                     *layout = text_layout_info
                 }
@@ -137,72 +132,94 @@ pub fn update_ui_independent_text_layout(
 #[allow(clippy::type_complexity)]
 pub fn extract_text_sprite(
     mut extracted_uinodes: ResMut<ExtractedUiNodes>,
-    texture_atlases: Extract<Res<Assets<TextureAtlas>>>,
-    text_pipeline: Extract<Res<TextPipeline>>,
-    windows: Extract<Res<Windows>>,
-    ui_stack: Extract<Res<UiStack>>,
+    texture_atlases: Extract<Res<Assets<TextureAtlasLayout>>>,
+    mut commands: Commands,
+    default_ui_camera: Extract<DefaultUiCamera>,
+    camera_query: Extract<Query<(Entity, &Camera)>>,
     text_query: Extract<
         Query<(
-            Entity,
             &GlobalTransform,
             &UiText,
-            &Text2dSize,
-            &ComputedVisibility,
+            &ViewVisibility,
             &TextLayoutInfo,
+            Option<&TargetCamera>,
         )>,
     >,
 ) {
-    let scale_factor = windows.scale_factor(WindowId::primary()) as f32;
-    for (entity, global_transform, text, calculated_size, computed_visibility, text_layout) in
+    for (global_transform, text, computed_visibility, text_layout, maybe_camera) in
         text_query.iter()
     {
-        if !computed_visibility.is_visible() {
+        if !computed_visibility.get() {
             continue;
         }
-        let text_glyphs = &text_layout.glyphs;
-        let (width, height) = (calculated_size.size.x, calculated_size.size.y);
-        let alignment_offset = match text.alignment.vertical {
-            VerticalAlign::Top => Vec3::new(0.0, -height, 0.0),
-            VerticalAlign::Center => Vec3::new(0.0, -height * 0.5, 0.0),
-            VerticalAlign::Bottom => Vec3::ZERO,
-        } + match text.alignment.horizontal {
-            HorizontalAlign::Left => Vec3::ZERO,
-            HorizontalAlign::Center => Vec3::new(-width * 0.5, 0.0, 0.0),
-            HorizontalAlign::Right => Vec3::new(-width, 0.0, 0.0),
+
+        let Some(camera_entity) = maybe_camera
+            .map(TargetCamera::entity)
+            .or(default_ui_camera.get())
+        else {
+            continue;
         };
 
-        let mut color = Color::WHITE;
+        let scale_factor = camera_query
+            .get(camera_entity)
+            .ok()
+            .and_then(|(_, c)| c.target_scaling_factor())
+            .unwrap_or(1.0);
+        let inverse_scale_factor = scale_factor.recip();
+
+        let text_glyphs = &text_layout.glyphs;
+        let (width, height) = (text_layout.logical_size.x, text_layout.logical_size.y);
+        let alignment_offset = -Vec2::new(width, height) * (Vec2::splat(0.5));
+
+        let mut transform = global_transform.affine()
+            * bevy::math::Affine3A::from_translation(alignment_offset.extend(0.));
+
+        transform.translation *= scale_factor;
+        transform.translation = transform.translation.round();
+        transform.translation *= inverse_scale_factor;
+
+        let mut color = LinearRgba::from(Color::WHITE);
         let mut current_section = usize::MAX;
-        for text_glyph in text_glyphs {
-            if text_glyph.section_index != current_section {
-                color = text.sections[text_glyph.section_index]
-                    .style
-                    .color
-                    .as_rgba_linear();
-                current_section = text_glyph.section_index;
+        for PositionedGlyph {
+            position,
+            atlas_info,
+            section_index,
+            ..
+        } in text_glyphs
+        {
+            if *section_index != current_section {
+                color = LinearRgba::from(text.sections[*section_index].style.color);
+                current_section = *section_index;
             }
-            let atlas = texture_atlases
-                .get(&text_glyph.atlas_info.texture_atlas)
-                .unwrap();
-            let texture = atlas.texture.clone_weak();
-            let index = text_glyph.atlas_info.glyph_index;
-            let rect = atlas.textures[index];
-            let atlas_size = Some(atlas.size);
+            let atlas = texture_atlases.get(&atlas_info.texture_atlas).unwrap();
+
+            let mut rect = atlas.textures[atlas_info.glyph_index].as_rect();
+            rect.min *= inverse_scale_factor;
+            rect.max *= inverse_scale_factor;
+
             let extracted_transform = global_transform.compute_matrix()
                 * Mat4::from_scale(Vec3::splat(scale_factor.recip()))
                 * Mat4::from_translation(
-                    alignment_offset * scale_factor + text_glyph.position.extend(0.),
+                    alignment_offset.extend(0.) * scale_factor + position.extend(0.),
                 );
-            extracted_uinodes.uinodes.push(ExtractedUiNode {
-                transform: extracted_transform,
-                background_color: color,
-                rect,
-                image: texture,
-                atlas_size,
-                clip: None,
-                scale_factor,
-                stack_index: global_transform.translation().z as usize,
-            });
+            extracted_uinodes.uinodes.insert(
+                commands.spawn_empty().id(),
+                ExtractedUiNode {
+                    stack_index: global_transform.translation().z as u32,
+                    transform: extracted_transform,
+                    color,
+                    rect,
+                    image: atlas_info.texture.id(),
+                    atlas_size: Some(atlas.size.as_vec2() * inverse_scale_factor),
+                    clip: None,
+                    flip_x: false,
+                    flip_y: false,
+                    camera_entity,
+                    border: [0.; 4],
+                    border_radius: [0.; 4],
+                    node_type: NodeType::Rect,
+                },
+            );
         }
     }
 }
@@ -211,17 +228,19 @@ pub struct IndependentTextPlugin;
 
 impl Plugin for IndependentTextPlugin {
     fn build(&self, app: &mut App) {
-        app.register_type::<UiText>().add_system_to_stage(
-            CoreStage::PostUpdate,
-            update_ui_independent_text_layout.after(ModifiesWindows),
-        );
+        app.register_type::<UiText>()
+            .add_systems(PostUpdate, update_ui_independent_text_layout)
+            .add_systems(
+                PostUpdate,
+                check_visibility::<With<UiText>>.in_set(VisibilitySystems::CheckVisibility),
+            );
         let render_app = match app.get_sub_app_mut(RenderApp) {
-            Ok(render_app) => render_app,
-            Err(_) => return,
+            Some(render_app) => render_app,
+            None => return,
         };
-        render_app.add_system_to_stage(
-            RenderStage::Extract,
-            extract_text_sprite.after(RenderUiSystem::ExtractNode),
+        render_app.add_systems(
+            ExtractSchedule,
+            extract_text_sprite.after(RenderUiSystem::ExtractText),
         );
     }
 }

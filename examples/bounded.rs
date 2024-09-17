@@ -14,7 +14,8 @@ fn setup(mut commands: Commands, asset_loader: Res<AssetServer>) {
                     color: Color::WHITE,
                 },
             }],
-            alignment: TextAlignment::CENTER,
+            justify: JustifyText::Center,
+            linebreak_behavior: bevy::text::BreakLineOn::WordBoundary,
         }),
         transform: Transform {
             translation: Vec3::new(400., 300., 100.),
@@ -29,13 +30,8 @@ fn setup(mut commands: Commands, asset_loader: Res<AssetServer>) {
 
 fn main() {
     App::new()
-        .insert_resource(WindowDescriptor {
-            width: 800.,
-            height: 600.,
-            ..Default::default()
-        })
         .add_plugins(DefaultPlugins)
-        .add_plugin(IndependentTextPlugin)
-        .add_startup_system(setup)
+        .add_plugins(IndependentTextPlugin)
+        .add_systems(Startup, setup)
         .run();
 }
